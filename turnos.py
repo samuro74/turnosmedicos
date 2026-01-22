@@ -15,6 +15,17 @@ def cargar_medicos(path):
         raise ValueError("El CSV debe tener una columna 'nombre'")
     return df["nombre"].tolist()
 
+def cargar_exclusiones(path):
+    df = pd.read_csv(path)
+    requeridas = {"nombre", "dia", "turno"}
+    if not requeridas.issubset(df.columns):
+        raise ValueError("exclusiones.csv debe tener columnas: nombre, dia, turno")
+
+    excl = defaultdict(lambda: defaultdict(set))
+    for _, r in df.iterrows():
+        excl[r["nombre"]][int(r["dia"])].add(r["turno"].upper())
+    return excl
+
 # =====================================================
 # VALIDACIÓN
 # =====================================================
@@ -28,7 +39,7 @@ def validar(config, medicos):
         errores.append("En turnos de 24 h no puede haber más médicos en noche que en día.")
 
     if len(medicos) < max(config["medicos_dia"], config["medicos_noche"]):
-        errores.append("Médicos insuficientes para cubrir los turnos requeridos.")
+        errores.append("Médicos insuficientes para cubrir los turnos.")
 
     if config["max_noches_consecutivas"] < 1:
         errores.append("El máximo de noches consecutivas debe ser ≥ 1.")
@@ -36,9 +47,18 @@ def validar(config, medicos):
     return errores
 
 # =====================================================
+# UTILIDAD EXCLUSIONES
+# =====================================================
+def bloqueado(nombre, dia, turno, exclusiones):
+    bloqueos = exclusiones.get(nombre, {}).get(dia, set())
+    if "DN" in bloqueos:
+        return True
+    return turno in bloqueos
+
+# =====================================================
 # GENERADOR
 # =====================================================
-def generar_turnos(config, medicos):
+def generar_turnos(config, medicos, exclusiones):
     errores = validar(config, medicos)
     if errores:
         raise RuntimeError("\n".join(errores))
@@ -52,21 +72,11 @@ def generar_turnos(config, medicos):
     turnos = {m: {} for m in medicos}
     carga = defaultdict(int)
     noches_consecutivas = defaultdict(int)
-
-    # Médicos que NO pueden programarse hoy por haber hecho noche ayer
-    bloqueo_hoy = set()
+    hizo_noche_ayer = defaultdict(bool)
 
     cola = deque(medicos)
 
     for dia in range(1, dias + 1):
-
-        disponibles = [m for m in medicos if m not in bloqueo_hoy]
-
-        if len(disponibles) < max(md, mn):
-            raise RuntimeError(
-                f"Día {dia}: no hay médicos suficientes disponibles "
-                f"por descanso post-noche."
-            )
 
         # =================================================
         # TURNOS DE 24 HORAS
@@ -74,12 +84,10 @@ def generar_turnos(config, medicos):
         if tipo == 24:
 
             diurnos = []
-            cola_local = deque([m for m in cola if m in disponibles])
-
             while len(diurnos) < md:
-                m = cola_local[0]
-                cola_local.rotate(-1)
-                if m not in diurnos:
+                m = cola[0]
+                cola.rotate(-1)
+                if m not in diurnos and not bloqueado(m, dia, "D", exclusiones):
                     diurnos.append(m)
 
             candidatos_noche = sorted(
@@ -91,15 +99,11 @@ def generar_turnos(config, medicos):
             for m in candidatos_noche:
                 if len(nocturnos) >= mn:
                     break
-                if noches_consecutivas[m] < max_noches:
+                if noches_consecutivas[m] < max_noches and not bloqueado(m, dia, "N", exclusiones):
                     nocturnos.append(m)
 
             if len(nocturnos) < mn:
-                raise RuntimeError(
-                    f"Día {dia}: no se pudo asignar noche sin violar reglas."
-                )
-
-            bloqueo_manana = set(nocturnos)
+                raise RuntimeError(f"Día {dia}: no se pudo asignar noche.")
 
             for m in medicos:
                 if m in nocturnos:
@@ -119,54 +123,53 @@ def generar_turnos(config, medicos):
         # =================================================
         else:
 
+            # --------- Día (bloqueo post-noche) ---------
             diurnos = []
-            cola_local = deque([m for m in cola if m in disponibles])
-
             while len(diurnos) < md:
-                m = cola_local[0]
-                cola_local.rotate(-1)
-                if m not in diurnos:
+                m = cola[0]
+                cola.rotate(-1)
+                if (
+                    m not in diurnos
+                    and not hizo_noche_ayer[m]
+                    and not bloqueado(m, dia, "D", exclusiones)
+                ):
                     diurnos.append(m)
 
+            # --------- Noche ---------
             candidatos_noche = sorted(
-                disponibles,
+                medicos,
                 key=lambda m: (noches_consecutivas[m], carga[m])
             )
 
             nocturnos = []
             for m in candidatos_noche:
-                if m in diurnos:
-                    continue
                 if len(nocturnos) >= mn:
                     break
-                if noches_consecutivas[m] < max_noches:
+                if (
+                    m not in diurnos
+                    and noches_consecutivas[m] < max_noches
+                    and not bloqueado(m, dia, "N", exclusiones)
+                ):
                     nocturnos.append(m)
 
             if len(nocturnos) < mn:
-                raise RuntimeError(
-                    f"Día {dia}: no se pudo asignar noche sin violar reglas."
-                )
-
-            bloqueo_manana = set(nocturnos)
+                raise RuntimeError(f"Día {dia}: no se pudo asignar noche.")
 
             for m in medicos:
-                if m in diurnos:
-                    turnos[m][f"Día {dia}"] = "D"
-                    carga[m] += 12
-                    noches_consecutivas[m] = 0
-                elif m in nocturnos:
+                if m in nocturnos:
                     turnos[m][f"Día {dia}"] = "N"
                     carga[m] += 12
                     noches_consecutivas[m] += 1
+                    hizo_noche_ayer[m] = True
+                elif m in diurnos:
+                    turnos[m][f"Día {dia}"] = "D"
+                    carga[m] += 12
+                    noches_consecutivas[m] = 0
+                    hizo_noche_ayer[m] = False
                 else:
                     turnos[m][f"Día {dia}"] = ""
                     noches_consecutivas[m] = 0
-
-        # Actualizar bloqueo para el día siguiente
-        bloqueo_hoy = bloqueo_manana.copy()
-
-        # Rotar cola global para equidad
-        cola.rotate(-1)
+                    hizo_noche_ayer[m] = False
 
     df = pd.DataFrame.from_dict(turnos, orient="index")
     df.insert(0, "Médico", df.index)
@@ -181,8 +184,9 @@ if __name__ == "__main__":
     try:
         config = cargar_config("config.json")
         medicos = cargar_medicos("medicos.csv")
+        exclusiones = cargar_exclusiones("exclusiones.csv")
 
-        df, carga = generar_turnos(config, medicos)
+        df, carga = generar_turnos(config, medicos, exclusiones)
         df.to_csv("cuadro_turnos.csv", index=False)
 
         print("Cuadro generado correctamente\n")
