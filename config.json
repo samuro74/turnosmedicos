@@ -1,0 +1,7 @@
+{
+  "dias_mes": 31,
+  "tipo_turno": 24,
+  "medicos_dia": 3,
+  "medicos_noche": 2,
+  "max_noches_consecutivas": 2
+}
