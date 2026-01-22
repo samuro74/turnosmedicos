@@ -1,7 +1,8 @@
 {
-  "dias_mes": 31,
+  "dias_mes": 10,
   "tipo_turno": 24,
   "medicos_dia": 3,
-  "medicos_noche": 2,
-  "max_noches_consecutivas": 2
+  "medicos_noche": 3,
+  "max_noches_consecutivas": 1,
+  "seed": null
 }
