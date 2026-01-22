@@ -1,5 +1,6 @@
 import json
 import pandas as pd
+import random
 from collections import defaultdict, deque
 
 # =====================================================
@@ -56,9 +57,37 @@ def bloqueado(nombre, dia, turno, exclusiones):
     return turno in bloqueos
 
 # =====================================================
+# UTILIDAD INSERTAR FILAS CON HORAS
+# =====================================================
+
+def insertar_filas_horas(df):
+    filas = []
+
+    for _, row in df.iterrows():
+        # Fila original
+        filas.append(row)
+
+        # Fila de horas
+        horas = {"Médico": ""}
+        for col, val in row.items():
+            if col == "Médico":
+                continue
+            if val in ("D", "N"):
+                horas[col] = 12
+            elif val == "DN":
+                horas[col] = 24
+            else:
+                horas[col] = ""
+
+        filas.append(pd.Series(horas))
+
+    return pd.DataFrame(filas).reset_index(drop=True)
+
+# =====================================================
 # GENERADOR
 # =====================================================
 def generar_turnos(config, medicos, exclusiones):
+    incidencias = []
     errores = validar(config, medicos)
     if errores:
         raise RuntimeError("\n".join(errores))
@@ -74,6 +103,8 @@ def generar_turnos(config, medicos, exclusiones):
     noches_consecutivas = defaultdict(int)
     hizo_noche_ayer = defaultdict(bool)
 
+    medicos = medicos.copy()
+    random.shuffle(medicos)
     cola = deque(medicos)
 
     for dia in range(1, dias + 1):
@@ -84,15 +115,24 @@ def generar_turnos(config, medicos, exclusiones):
         if tipo == 24:
 
             diurnos = []
+            cola.rotate(random.randint(0, len(cola) - 1))
             while len(diurnos) < md:
                 m = cola[0]
                 cola.rotate(-1)
-                if m not in diurnos and not bloqueado(m, dia, "D", exclusiones):
+                if (
+                    m not in diurnos
+                    and not hizo_noche_ayer[m]
+                    and not bloqueado(m, dia, "D", exclusiones)
+                ):
                     diurnos.append(m)
 
             candidatos_noche = sorted(
                 diurnos,
-                key=lambda m: (carga[m], noches_consecutivas[m])
+                key=lambda m: (
+                    carga[m],
+                    noches_consecutivas[m],
+                    random.random()
+                )
             )
 
             nocturnos = []
@@ -103,20 +143,25 @@ def generar_turnos(config, medicos, exclusiones):
                     nocturnos.append(m)
 
             if len(nocturnos) < mn:
-                raise RuntimeError(f"Día {dia}: no se pudo asignar noche.")
+                incidencias.append(
+                    f"Día {dia}: no se pudo asignar {mn - len(nocturnos)} turno(s) de noche (24h)."
+                )
 
             for m in medicos:
                 if m in nocturnos:
                     turnos[m][f"Día {dia}"] = "DN"
                     carga[m] += 24
                     noches_consecutivas[m] += 1
+                    hizo_noche_ayer[m] = True
                 elif m in diurnos:
                     turnos[m][f"Día {dia}"] = "D"
                     carga[m] += 12
                     noches_consecutivas[m] = 0
+                    hizo_noche_ayer[m] = False
                 else:
                     turnos[m][f"Día {dia}"] = ""
                     noches_consecutivas[m] = 0
+                    hizo_noche_ayer[m] = False
 
         # =================================================
         # TURNOS DE 12 HORAS
@@ -125,6 +170,7 @@ def generar_turnos(config, medicos, exclusiones):
 
             # --------- Día (bloqueo post-noche) ---------
             diurnos = []
+            cola.rotate(random.randint(0, len(cola) - 1))
             while len(diurnos) < md:
                 m = cola[0]
                 cola.rotate(-1)
@@ -138,7 +184,11 @@ def generar_turnos(config, medicos, exclusiones):
             # --------- Noche ---------
             candidatos_noche = sorted(
                 medicos,
-                key=lambda m: (noches_consecutivas[m], carga[m])
+                key=lambda m: (
+                    noches_consecutivas[m],
+                    carga[m],
+                    random.random()
+                )
             )
 
             nocturnos = []
@@ -153,7 +203,9 @@ def generar_turnos(config, medicos, exclusiones):
                     nocturnos.append(m)
 
             if len(nocturnos) < mn:
-                raise RuntimeError(f"Día {dia}: no se pudo asignar noche.")
+                incidencias.append(
+                    f"Día {dia}: no se pudo asignar {mn - len(nocturnos)} turno(s) de noche (12h)."
+                )
 
             for m in medicos:
                 if m in nocturnos:
@@ -175,7 +227,7 @@ def generar_turnos(config, medicos, exclusiones):
     df.insert(0, "Médico", df.index)
     df.reset_index(drop=True, inplace=True)
 
-    return df, carga
+    return df, carga, incidencias
 
 # =====================================================
 # EJECUCIÓN
@@ -183,16 +235,27 @@ def generar_turnos(config, medicos, exclusiones):
 if __name__ == "__main__":
     try:
         config = cargar_config("config.json")
+        
+        if config.get("seed") is not None:
+            random.seed(config["seed"])
+
         medicos = cargar_medicos("medicos.csv")
         exclusiones = cargar_exclusiones("exclusiones.csv")
 
-        df, carga = generar_turnos(config, medicos, exclusiones)
+        df, carga, incidencias = generar_turnos(config, medicos, exclusiones)
+        df = insertar_filas_horas(df)
         df.to_csv("cuadro_turnos.csv", index=False)
 
         print("Cuadro generado correctamente\n")
         print("Carga horaria total:")
         for m, h in sorted(carga.items(), key=lambda x: x[1]):
             print(f"{m}: {h} horas")
+        if incidencias:
+            print("\nINCIDENCIAS DETECTADAS:")
+            for i in incidencias:
+                print(f"- {i}")
+        else:
+            print("\nNo se detectaron incidencias en la asignación.")
 
     except Exception as e:
         print("ERROR:")
