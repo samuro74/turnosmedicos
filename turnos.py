@@ -1,7 +1,7 @@
 import json
 import pandas as pd
 import random
-from collections import defaultdict, deque
+from collections import defaultdict
 
 # =====================================================
 # CARGA
@@ -59,15 +59,12 @@ def bloqueado(nombre, dia, turno, exclusiones):
 # =====================================================
 # UTILIDAD INSERTAR FILAS CON HORAS
 # =====================================================
-
 def insertar_filas_horas(df):
     filas = []
 
     for _, row in df.iterrows():
-        # Fila original
         filas.append(row)
 
-        # Fila de horas
         horas = {"Médico": ""}
         for col, val in row.items():
             if col == "Médico":
@@ -99,13 +96,13 @@ def generar_turnos(config, medicos, exclusiones):
     max_noches = config["max_noches_consecutivas"]
 
     turnos = {m: {} for m in medicos}
+
     carga = defaultdict(int)
     noches_consecutivas = defaultdict(int)
     hizo_noche_ayer = defaultdict(bool)
 
-    medicos = medicos.copy()
-    random.shuffle(medicos)
-    cola = deque(medicos)
+    turnos_dia = defaultdict(int)
+    turnos_noche = defaultdict(int)
 
     for dia in range(1, dias + 1):
 
@@ -114,14 +111,21 @@ def generar_turnos(config, medicos, exclusiones):
         # =================================================
         if tipo == 24:
 
+            candidatos_dia = sorted(
+                medicos,
+                key=lambda m: (
+                    turnos_dia[m],
+                    carga[m],
+                    random.random()
+                )
+            )
+
             diurnos = []
-            cola.rotate(random.randint(0, len(cola) - 1))
-            while len(diurnos) < md:
-                m = cola[0]
-                cola.rotate(-1)
+            for m in candidatos_dia:
+                if len(diurnos) >= md:
+                    break
                 if (
-                    m not in diurnos
-                    and not hizo_noche_ayer[m]
+                    not hizo_noche_ayer[m]
                     and not bloqueado(m, dia, "D", exclusiones)
                 ):
                     diurnos.append(m)
@@ -129,8 +133,9 @@ def generar_turnos(config, medicos, exclusiones):
             candidatos_noche = sorted(
                 diurnos,
                 key=lambda m: (
-                    carga[m],
+                    turnos_noche[m],
                     noches_consecutivas[m],
+                    carga[m],
                     random.random()
                 )
             )
@@ -139,7 +144,10 @@ def generar_turnos(config, medicos, exclusiones):
             for m in candidatos_noche:
                 if len(nocturnos) >= mn:
                     break
-                if noches_consecutivas[m] < max_noches and not bloqueado(m, dia, "N", exclusiones):
+                if (
+                    noches_consecutivas[m] < max_noches
+                    and not bloqueado(m, dia, "N", exclusiones)
+                ):
                     nocturnos.append(m)
 
             if len(nocturnos) < mn:
@@ -151,11 +159,14 @@ def generar_turnos(config, medicos, exclusiones):
                 if m in nocturnos:
                     turnos[m][f"Día {dia}"] = "DN"
                     carga[m] += 24
+                    turnos_dia[m] += 1
+                    turnos_noche[m] += 1
                     noches_consecutivas[m] += 1
                     hizo_noche_ayer[m] = True
                 elif m in diurnos:
                     turnos[m][f"Día {dia}"] = "D"
                     carga[m] += 12
+                    turnos_dia[m] += 1
                     noches_consecutivas[m] = 0
                     hizo_noche_ayer[m] = False
                 else:
@@ -168,23 +179,29 @@ def generar_turnos(config, medicos, exclusiones):
         # =================================================
         else:
 
-            # --------- Día (bloqueo post-noche) ---------
+            candidatos_dia = sorted(
+                medicos,
+                key=lambda m: (
+                    turnos_dia[m],
+                    carga[m],
+                    random.random()
+                )
+            )
+
             diurnos = []
-            cola.rotate(random.randint(0, len(cola) - 1))
-            while len(diurnos) < md:
-                m = cola[0]
-                cola.rotate(-1)
+            for m in candidatos_dia:
+                if len(diurnos) >= md:
+                    break
                 if (
-                    m not in diurnos
-                    and not hizo_noche_ayer[m]
+                    not hizo_noche_ayer[m]
                     and not bloqueado(m, dia, "D", exclusiones)
                 ):
                     diurnos.append(m)
 
-            # --------- Noche ---------
             candidatos_noche = sorted(
                 medicos,
                 key=lambda m: (
+                    turnos_noche[m],
                     noches_consecutivas[m],
                     carga[m],
                     random.random()
@@ -211,11 +228,13 @@ def generar_turnos(config, medicos, exclusiones):
                 if m in nocturnos:
                     turnos[m][f"Día {dia}"] = "N"
                     carga[m] += 12
+                    turnos_noche[m] += 1
                     noches_consecutivas[m] += 1
                     hizo_noche_ayer[m] = True
                 elif m in diurnos:
                     turnos[m][f"Día {dia}"] = "D"
                     carga[m] += 12
+                    turnos_dia[m] += 1
                     noches_consecutivas[m] = 0
                     hizo_noche_ayer[m] = False
                 else:
@@ -227,7 +246,7 @@ def generar_turnos(config, medicos, exclusiones):
     df.insert(0, "Médico", df.index)
     df.reset_index(drop=True, inplace=True)
 
-    return df, carga, incidencias
+    return df, carga, turnos_dia, turnos_noche, incidencias
 
 # =====================================================
 # EJECUCIÓN
@@ -235,21 +254,24 @@ def generar_turnos(config, medicos, exclusiones):
 if __name__ == "__main__":
     try:
         config = cargar_config("config.json")
-        
+
         if config.get("seed") is not None:
             random.seed(config["seed"])
 
         medicos = cargar_medicos("medicos.csv")
         exclusiones = cargar_exclusiones("exclusiones.csv")
 
-        df, carga, incidencias = generar_turnos(config, medicos, exclusiones)
+        df, carga, td, tn, incidencias = generar_turnos(config, medicos, exclusiones)
         df = insertar_filas_horas(df)
-        df.to_csv("cuadro_turnos.csv", index=False)
+        df.to_excel("cuadro_turnos.xlsx", index=False)
 
         print("Cuadro generado correctamente\n")
-        print("Carga horaria total:")
-        for m, h in sorted(carga.items(), key=lambda x: x[1]):
-            print(f"{m}: {h} horas")
+        print("Resumen de carga y turnos:")
+        for m in sorted(medicos):
+            print(
+                f"{m}: Día={td[m]} | Noche={tn[m]} | Horas={carga[m]}"
+            )
+
         if incidencias:
             print("\nINCIDENCIAS DETECTADAS:")
             for i in incidencias:
